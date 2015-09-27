@@ -1,0 +1,11 @@
+package "fifo-to-network"
+version "0.0.0"
+purpose "stream sound data received from fifo to network"
+versiontext "fifo-to-network is in the public domain"
+
+option "srate" r "sampling rate / Hz"
+  float optional
+  default="48000"
+  
+  
+  
