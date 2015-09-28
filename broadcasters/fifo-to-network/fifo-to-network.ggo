@@ -7,5 +7,18 @@ option "srate" r "sampling rate / Hz"
   float optional
   default="48000"
   
-  
-  
+option "channels" c "number of audio channels"
+  short optional
+  default="2"
+
+option "fifo" f "file name of fifo"
+  string optional
+  default="./fifo"
+
+option "period" p "number of audio samples / channel per packet"
+  int optional
+  default="2"
+
+option "delay" d "delay in seconds between reception of audio data and planned playback time of first sample at the network receiver"
+  double optional
+  default="0.5"
