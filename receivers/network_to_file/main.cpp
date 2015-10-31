@@ -50,25 +50,39 @@ int main(int argc, char * const * argv)
   }
   try {
     asio::ip::udp::endpoint multicast_receiver_endpoint
-      (asio::ip::address::from_string(argv[1]), MULTICAST_PORT);
+      (asio::ip::address::from_string(MULTICAST_IP), MULTICAST_PORT);
     
     asio::ip::udp::socket multicast_receiver_socket(asio_service);
     multicast_receiver_socket.open(multicast_receiver_endpoint.protocol());
     multicast_receiver_socket.set_option(asio::ip::udp::socket::reuse_address(true));
     multicast_receiver_socket.bind(multicast_receiver_endpoint);
-    multicast_receiver_socket.set_option(asio::ip::multicast::join_group
-                      (asio::ip::address::from_string(MULTICAST_IP)));
+    multicast_receiver_socket.set_option
+      (asio::ip::multicast::join_group
+       (asio::ip::address::from_string(MULTICAST_IP).to_v4(),
+        asio::ip::address::from_string(argv[1]).to_v4()
+        )
+       );
     SoundSender::NetworkPacket p;
     asio::mutable_buffers_1 buf(&p, sizeof(p));
     for(;;) {
       multicast_receiver_socket.receive(buf);
-      printf("received packet\n");
+      printf("- \n");
+      printf("   magic: ['%c','%c','%c','%c']\n",
+             p.magic[0],p.magic[1],p.magic[2],p.magic[3]);
+      printf("   protocol_version: %u\n", p.protocol_version);
+      printf("   stream_id: %u\n", p.stream_id);
+      printf("   packet_number: %u\n", p.packet_number);
+      printf("   audible_time: %lld\n", (long long)p.audible_time);
+      printf("   audio: [");
+      unsigned i;
+      for (i = 0; i < (MULTICAST_BLOCK_SIZE * MULTICAST_CHANNELS-1); ++i)
+        printf("%hd,", p.audio[i]);
+      printf("%hd]\n", p.audio[i]);
     }
   } catch (std::exception & e) {
     fprintf(stderr, "Caught exception %s\n", e.what());
     return 1;
   }
-
   return 0;
 }
 
