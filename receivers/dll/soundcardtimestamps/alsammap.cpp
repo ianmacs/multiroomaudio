@@ -1,10 +1,16 @@
 #include <string>
 #include <alsa/asoundlib.h>
+#include <stdint.h>
+#include <math.h>
+
+#ifndef M_PI
+static const double M_Pi = 3.14159265358979323846;
+#endif
 
 void check(const std::string & function_name, int error) {
   if (error) { 
-    fprintf(stderr, "function %s returned error code %d\n",
-            function_name.c_str(), error);
+    fprintf(stderr, "function %s returned error code %d (%s)\n",
+            function_name.c_str(), error, snd_strerror(error));
     exit(1);
   }
 }
@@ -46,23 +52,91 @@ namespace SoundSender {
   }
 }
 
-#define NSTAMPS 11111
+class NarrowingDLL {
+  double nominalUpdateRate;
+  double initialBandWidth, terminalBandWidth, currentBandWidth;
+  double recursiveBandWidthFilterCoefficient;
+  double b,c,e2,t1;
+  bool reset;
+
+  void updateDllCoefficients() {
+    if (reset) {
+      currentBandWidth = initialBandWidth;
+    } else {
+      currentBandWidth = currentBandWidth * recursiveBandWidthFilterCoefficient
+        + terminalBandWidth * (1 - recursiveBandWidthFilterCoefficient);
+    }
+    double omega = 2*M_PI * currentBandWidth / nominalUpdateRate;
+    b = sqrt(2) * omega;
+    c = omega * omega;
+  }
+
+public:
+  NarrowingDLL(double nominalUpdateRate,
+               double initialBandWidth,
+               double terminalBandWidth,
+               double bandWidthAdaptationTimeConstant)
+    : nominalUpdateRate(nominalUpdateRate),
+      initialBandWidth(initialBandWidth),
+      terminalBandWidth(terminalBandWidth),
+      reset(true)
+  {
+    double bandWidthAdaptationTimeConstantInUpdates =
+      bandWidthAdaptationTimeConstant * nominalUpdateRate;
+    recursiveBandWidthFilterCoefficient =
+      exp(-1 / bandWidthAdaptationTimeConstantInUpdates);
+  }
+
+  std::pair<double,double> operator()(double new_t0) 
+  {
+    double t0;
+    updateDllCoefficients();
+    if (reset) {
+      t0 = new_t0;
+      e2 = 1 / nominalUpdateRate;
+      t1 = t0 + e2;
+      reset = false;
+    } else {
+      t0 = t1;
+      double e = new_t0 - t0;
+      t1 = t0 + b*e + e2;
+      e2 = e2 + c*e;
+    }
+    return std::pair<double,double>(t0,t1);
+  }
+};
+
 
 SoundSender::Clock clock_;
-SoundSender::Clock::nsec_t timestamps[NSTAMPS] = {};
-int frame_count_min[NSTAMPS]={}, frame_count_max[NSTAMPS]={};
-size_t tsindex = 0;
+class NarrowingDLL dll(double(MULTICAST_SAMPLERATE)/MULTICAST_BLOCK_SIZE,
+                       2, 0.01, 5);
+SoundSender::Clock::nsec_t analysbuf[20000] = {};              
+SoundSender::Clock::nsec_t sample_times[MULTICAST_BLOCK_SIZE];
 
 void save_timestamps() {
-  timestamps[tsindex++] = clock_.get_nsec();
-  if (tsindex == sizeof(timestamps)/sizeof(timestamps[0])) {
-    int fd = open("/tmp/timestamps.mmap", O_WRONLY | O_CREAT | O_TRUNC);
-    write(fd, timestamps, sizeof(timestamps));
-    write(fd, ::frame_count_min, sizeof(::frame_count_min));
-    write(fd, ::frame_count_max, sizeof(::frame_count_max));
-    close(fd);
+  static SoundSender::Clock::nsec_t dll_epoch = clock_.get_nsec();
+  static unsigned analysbufindex = 0;
+  SoundSender::Clock::nsec_t now = clock_.get_nsec();
+  auto filtered = dll((now - dll_epoch) / 1e9);
+  double t0 = filtered.first;
+  double dT = filtered.second - t0;
+  for (unsigned k = 0; k < MULTICAST_BLOCK_SIZE; ++k) {
+    sample_times[k] =
+      static_cast<SoundSender::Clock::nsec_t>((t0 + k * dT / MULTICAST_BLOCK_SIZE) * 1e9);
+    sample_times[k] += dll_epoch;
   }
+  analysbuf[analysbufindex++] = sample_times[0];
+  analysbufindex %= 20000;
 }
+
+inline int16_t sound(bool side, int64_t time) {
+  double f = side ? 440.0 : 623.0;
+  double frac = (time % 1000000000) / 1e9;
+  double phase =  2 * M_PI * f * frac;
+  double fine = sin(phase);
+  double env = (frac > 0.125) ? 0.0 : sin(2*M_PI*4*frac);
+  return static_cast<int16_t>(32000 * fine * env);
+} 
 
 int main(int argc, char ** argv) {
   const char * alsa_playback_device = "hw:0,0";
@@ -122,7 +196,7 @@ int main(int argc, char ** argv) {
       for (unsigned k = 0; k < frames; ++k) {
         char * sample_address = (char*)areas[ch].addr;
         sample_address += (areas[ch].first + (k + offset) * areas[ch].step) / 8;
-        *(int16_t*) sample_address = 0;
+        *(int16_t*) sample_address = sound(ch,sample_times[k]);
       }
     }
     int err = snd_pcm_mmap_commit (pcm, offset, frames);
